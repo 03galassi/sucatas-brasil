@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function myProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    function hasProfile() {
+      return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    function isAdmin() { return hasProfile() && myProfile().role == 'admin' && myProfile().active != false; }
+    function isManager() { return hasProfile() && myProfile().role == 'gerente' && myProfile().active != false; }
+    function activeUser() { return hasProfile() && myProfile().active != false; }
+    function sameUnit(unit) { return activeUser() && myProfile().unit == unit; }
+    function canReadUnit(unit) { return isAdmin() || sameUnit(unit); }
+    match /users/{uid} {
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
+      allow create, update, delete: if isAdmin();
+    }
+    match /userInvites/{id} {
+      allow read, create: if isAdmin();
+      allow update, delete: if isAdmin();
+    }
+    match /stock/{id} {
+      allow read: if canReadUnit(resource.data.unit);
+      allow create: if activeUser() && (isAdmin() || (sameUnit(request.resource.data.unit) && request.resource.data.category in ['sucata','reaproveitado','novo']));
+      allow update: if activeUser() && (isAdmin() || (sameUnit(resource.data.unit) && sameUnit(request.resource.data.unit)));
+      allow delete: if isAdmin();
+    }
+    match /purchases/{id} {
+      allow read: if canReadUnit(resource.data.unit);
+      allow create: if activeUser() && (isAdmin() || (sameUnit(request.resource.data.unit) && request.resource.data.createdBy == request.auth.uid));
+      allow update, delete: if isAdmin();
+    }
+    match /sales/{id} {
+      allow read: if canReadUnit(resource.data.unit);
+      allow create: if activeUser() && (isAdmin() || (sameUnit(request.resource.data.unit) && request.resource.data.createdBy == request.auth.uid));
+      allow update, delete: if isAdmin();
+    }
+    match /cashMovements/{id} {
+      allow read: if canReadUnit(resource.data.unit);
+      allow create: if activeUser() && (isAdmin() || (sameUnit(request.resource.data.unit) && request.resource.data.createdBy == request.auth.uid));
+      allow update, delete: if isAdmin();
+    }
+    match /transfers/{id} {
+      allow read: if isAdmin() || (activeUser() && (myProfile().unit == resource.data.origin || myProfile().unit == resource.data.destination));
+      allow create: if activeUser() && request.resource.data.origin != request.resource.data.destination &&
+        (isAdmin() || (sameUnit(request.resource.data.origin) && request.resource.data.createdBy == request.auth.uid));
+      allow update: if activeUser() && (isAdmin() || (sameUnit(resource.data.destination) && request.resource.data.status == 'recebida' && resource.data.status == 'em_transito'));
+      allow delete: if isAdmin();
+    }
+    match /auditLogs/{id} {
+      allow read: if isAdmin() || (activeUser() && resource.data.unit == myProfile().unit);
+      allow create: if activeUser() && (isAdmin() || (sameUnit(request.resource.data.unit) && request.resource.data.createdBy == request.auth.uid));
+      allow update, delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
