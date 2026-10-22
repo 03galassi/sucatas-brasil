@@ -151,6 +151,83 @@ export default { async fetch(req, env) {
       await env.DB.prepare("INSERT INTO users(id,name,email,password_hash,role,unit) VALUES(?,?,?,?,?,?)").bind(uid(),x.name,String(x.email).toLowerCase(),ph,x.role,x.unit).run();
       return json({ok:true},201);
     }
+    // Cargas interestaduais: requer as tabelas criadas por migration_v2.sql.
+    if(u.pathname==="/api/shipments" && req.method==="GET") {
+      let rows;
+      if(user.role==="admin" && !unitParam) {
+        rows=await env.DB.prepare("SELECT s.*, (SELECT COUNT(*) FROM shipment_items i WHERE i.shipment_id=s.id) AS item_count FROM shipments s ORDER BY s.created_at DESC LIMIT 200").all();
+      } else {
+        rows=await env.DB.prepare("SELECT DISTINCT s.*, (SELECT COUNT(*) FROM shipment_items i WHERE i.shipment_id=s.id) AS item_count FROM shipments s JOIN shipment_items si ON si.shipment_id=s.id WHERE si.origin_unit=? ORDER BY s.created_at DESC LIMIT 200").bind(unit).all();
+      }
+      return json({items:rows.results||[]});
+    }
+    if(u.pathname==="/api/shipments" && req.method==="POST") {
+      if(user.role!=="admin" && user.role!=="gerente") return json({error:"Apenas administrador ou gerente pode registrar cargas."},403);
+      const x=await readBody(req);
+      const items=Array.isArray(x.items)?x.items:[];
+      const freight=Number(x.freight_cost||0);
+      if(!x.customer_name || !x.destination_state || !items.length || !Number.isFinite(freight) || freight<0) return json({error:"Informe comprador, estado de destino, materiais e frete válido."},400);
+      const normalized=[];
+      for(const it of items) {
+        const origin=it.origin_unit, category=it.category, product=String(it.product||"").trim(), qty=Number(it.qty), measure=it.measure||"kg", price=Number(it.price_unit||0);
+        if(!validUnit(origin)||!["sucata","reaproveitado","novo"].includes(category)||!product||!Number.isFinite(qty)||qty<=0||!Number.isFinite(price)||price<0) return json({error:"Confira unidade de origem, categoria, material, quantidade e preço de cada item."},400);
+        normalized.push({id:uid(),origin,category,product,qty,measure,price,total:qty*price});
+      }
+      // Verifica o estoque agregado, inclusive quando o mesmo produto aparece em mais de uma linha.
+      const demand=new Map();
+      for(const it of normalized) {
+        const key=[it.origin,it.category,it.product,it.measure].join("\u0000");
+        demand.set(key,(demand.get(key)||0)+it.qty);
+      }
+      for(const [key,qtyNeeded] of demand) {
+        const [origin,category,product,measure]=key.split("\u0000");
+        const available=await env.DB.prepare("SELECT quantity FROM stock WHERE unit=? AND category=? AND product=? AND measure=?").bind(origin,category,product,measure).first();
+        if(!available || Number(available.quantity)<qtyNeeded) return json({error:`Estoque insuficiente para ${product} em ${origin}.`},409);
+      }
+      const shipmentId=uid(), total=normalized.reduce((sum,it)=>sum+it.total,0);
+      const stmts=[env.DB.prepare("INSERT INTO shipments(id,customer_name,customer_document,destination_state,destination_city,destination_address,vehicle,driver,freight_cost,sale_total,status,notes,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(shipmentId,x.customer_name,x.customer_document||null,x.destination_state,x.destination_city||null,x.destination_address||null,x.vehicle||null,x.driver||null,freight,total,"preparando",x.notes||null,user.id)];
+      for(const it of normalized) {
+        stmts.push(env.DB.prepare("UPDATE stock SET quantity=quantity-?,updated_at=CURRENT_TIMESTAMP WHERE unit=? AND category=? AND product=? AND measure=? AND quantity>=?").bind(it.qty,it.origin,it.category,it.product,it.measure,it.qty));
+        stmts.push(env.DB.prepare("INSERT INTO shipment_items(id,shipment_id,origin_unit,category,product,qty,measure,price_unit) VALUES(?,?,?,?,?,?,?,?)").bind(it.id,shipmentId,it.origin,it.category,it.product,it.qty,it.measure,it.price));
+        // Registra a venda no histórico existente, sem lançar recebimento no caixa automaticamente.
+        stmts.push(env.DB.prepare("INSERT INTO sales(id,unit,category,product,qty,measure,price,total,payment,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),it.origin,it.category,it.product,it.qty,it.measure,it.price,it.total,"a_receber",user.id));
+      }
+      if(freight>0) {
+        const expenseId=uid();
+        stmts.push(env.DB.prepare("INSERT INTO shipment_expenses(id,shipment_id,category,amount,notes,created_by) VALUES(?,?,?,?,?,?)").bind(expenseId,shipmentId,"frete",freight,x.freight_notes||"Frete da carga",user.id));
+        // O frete fica registrado na carga; não é atribuído ao caixa de uma única unidade para evitar distorção.
+      }
+      stmts.push(env.DB.prepare("INSERT INTO audit_logs(user_id,unit,action,entity_id,summary) VALUES(?,?,?,?,?)").bind(user.id,user.unit,"shipment_created",shipmentId,`Carga para ${x.customer_name}; total ${total}; frete ${freight}`));
+      await env.DB.batch(stmts);
+      return json({ok:true,id:shipmentId,sale_total:total,freight_cost:freight,status:"preparando"},201);
+    }
+    const shipmentStatusMatch=u.pathname.match(/^\/api\/shipments\/([^/]+)\/status$/);
+    if(shipmentStatusMatch && req.method==="PUT") {
+      if(user.role!=="admin" && user.role!=="gerente") return json({error:"Apenas administrador ou gerente pode alterar o status da carga."},403);
+      const x=await readBody(req), status=x.status;
+      if(!["preparando","em_transito","entregue"].includes(status)) return json({error:"Status inválido. Cancelamento exige estorno controlado de estoque e vendas e ainda não está habilitado."},400);
+      const shipment=await env.DB.prepare("SELECT * FROM shipments WHERE id=?").bind(shipmentStatusMatch[1]).first();
+      if(!shipment) return json({error:"Carga não encontrada."},404);
+      if(shipment.status==="cancelada" || shipment.status==="entregue") return json({error:"Não é possível alterar uma carga cancelada ou entregue."},409);
+      await env.DB.batch([
+        env.DB.prepare("UPDATE shipments SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(status,shipment.id),
+        env.DB.prepare("INSERT INTO audit_logs(user_id,unit,action,entity_id,summary) VALUES(?,?,?,?,?)").bind(user.id,user.unit,"shipment_status",shipment.id,`Status alterado para ${status}`)
+      ]);
+      return json({ok:true,id:shipment.id,status});
+    }
+    const shipmentDetailMatch=u.pathname.match(/^\/api\/shipments\/([^/]+)$/);
+    if(shipmentDetailMatch && req.method==="GET") {
+      const shipment=await env.DB.prepare("SELECT * FROM shipments WHERE id=?").bind(shipmentDetailMatch[1]).first();
+      if(!shipment) return json({error:"Carga não encontrada."},404);
+      if(user.role!=="admin") {
+        const allowed=await env.DB.prepare("SELECT 1 AS ok FROM shipment_items WHERE shipment_id=? AND origin_unit=? LIMIT 1").bind(shipment.id,user.unit).first();
+        if(!allowed) return json({error:"Sem permissão para consultar esta carga."},403);
+      }
+      const items=await env.DB.prepare("SELECT * FROM shipment_items WHERE shipment_id=? ORDER BY origin_unit,product").bind(shipment.id).all();
+      const expenses=await env.DB.prepare("SELECT * FROM shipment_expenses WHERE shipment_id=? ORDER BY created_at").bind(shipment.id).all();
+      return json({shipment,items:items.results||[],expenses:expenses.results||[]});
+    }
+
     if(u.pathname==="/api/reports/cash-summary" && req.method==="GET") {
       const row=await env.DB.prepare("SELECT SUM(CASE WHEN direction='entrada' THEN amount ELSE 0 END) AS entradas,SUM(CASE WHEN direction='saida' THEN amount ELSE 0 END) AS saidas FROM cash_movements WHERE unit=? AND date(created_at)=date('now')").bind(unit).first();
       return json({unit,date:new Date().toISOString().slice(0,10),entradas:row.entradas||0,saidas:row.saidas||0,saldo:(row.entradas||0)-(row.saidas||0)});
