@@ -1,0 +1,13 @@
+name = "sucatas-brasil"
+main = "src/worker.js"
+compatibility_date = "2026-10-21"
+
+[assets]
+directory = "./src"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sucatas-brasil-db"
+database_id = "PREENCHA_COM_O_ID_DO_SEU_D1"
