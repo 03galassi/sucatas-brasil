@@ -1,22 +1,20 @@
-# Sucatas Brasil — Cloudflare + GitHub
+# Sucatas Brasil — Cloudflare Workers + D1
 
-Pacote inicial de desenvolvimento para as unidades Sete Quedas e Jardim.
+Este pacote substitui os arquivos da aplicação com uma versão integrada inicial para duas unidades (Sete Quedas e Jardim).
 
-## Arquitetura
-- Cloudflare Workers: API e lógica do sistema
-- Cloudflare D1: banco de dados SQL
-- GitHub: código-fonte
-- `src/index.html`: interface inicial
-- `src/worker.js`: API inicial
-- `schema.sql`: tabelas
+## Arquivos
+- `wrangler.toml`: configura Worker, assets e binding D1.
+- `src/worker.js`: API com setup/login, estoque, compras, vendas, caixa, transferências, usuários e resumo diário.
+- `src/index.html`: interface web responsiva.
+- `schema.sql`: estrutura de tabelas.
 
-## Configuração
-1. Crie um banco D1 chamado `sucatas-brasil-db`.
-2. Copie o ID do banco para `wrangler.toml`, substituindo `PREENCHA_COM_O_ID_DO_SEU_D1`.
-3. Execute `schema.sql` no console D1 ou com `npx wrangler d1 execute sucatas-brasil-db --remote --file=./schema.sql`.
-4. Configure `AUTH_SECRET` como Secret nas configurações do Worker. Não publique esse valor no GitHub.
-5. Publique o Worker com `npm install` e `npm run deploy`, ou configure a publicação pelo painel Cloudflare.
-6. Abra a aplicação e use “Configuração inicial” para criar o primeiro administrador.
+## Antes de publicar
+1. Confira se `database_id` em `wrangler.toml` é o ID do seu banco D1. O valor neste pacote foi preenchido com o ID informado durante a configuração.
+2. Confirme que o banco tem as tabelas do `schema.sql`; não é necessário executar o schema novamente se já existirem.
+3. Na configuração do Worker, adicione `AUTH_SECRET` como **Secret** com um valor aleatório forte (pelo menos 32 bytes). Não coloque o segredo no GitHub.
+4. Publique na raiz do repositório com `npx wrangler deploy` ou `npm run deploy`.
+5. Teste `https://SEU-WORKER.workers.dev/api/health`. Deve retornar JSON com `ok: true`.
+6. Na página inicial, use “Configuração inicial do administrador”. Senha com pelo menos 12 caracteres.
 
-## Importante
-Este pacote é um MVP inicial, não um ERP validado para operação comercial. Antes de usar dinheiro real, teste segurança, permissões, concorrência, estoque, transferências, caixa e backups. Ainda faltam fechamento diário completo, recibos, estornos auditáveis, recuperação de senha e tratamento completo de divergências de transferências.
+## Limitações e segurança
+Este é um MVP funcional inicial, ainda não auditado para operação comercial. Antes de usar com dinheiro real, faça testes completos de concorrência, permissões, transações, recebimento de transferências e recuperação de falhas. A API usa token de sessão assinado, mas o armazenamento do token no navegador é apenas em memória. A API não implementa fechamento de caixa formal, recibos PDF, estornos ou recebimento parcial de transferências. Não coloque dados reais antes de concluir testes.
