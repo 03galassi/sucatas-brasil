@@ -125,7 +125,7 @@ export default { async fetch(req, env) {
       ]);
       return json({ok:true,id:tid,status:"em_transito"},201);
     }
-    const match=u.pathname.match(/^\\/api\\/transfers\\/([^/]+)\\/receive$/);
+   const match = u.pathname.match(/^\/api\/transfers\/([^/]+)\/receive$/);
     if(match&&req.method==="POST") {
       const t=await env.DB.prepare("SELECT * FROM transfers WHERE id=?").bind(match[1]).first();
       if(!t)return json({error:"Transferência não encontrada."},404);
